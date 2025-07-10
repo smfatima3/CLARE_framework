@@ -284,18 +284,38 @@ class CLARETrainingManager:
         ).to(self.device)
         
         # Initialize cluster embeddings with discovered clusters
-        if hasattr(self.cluster_discovery, 'W'):
+        if hasattr(self.cluster_discovery, 'W') and self.word_embeddings is not None:
             # Use cluster-term matrix to initialize cluster embeddings
             # Average word embeddings weighted by cluster membership
             cluster_embeddings = []
             
+            # Get the vocabulary size from the cluster-term matrix
+            vocab_size = self.cluster_discovery.W.shape[0]
+            
+            # Make sure we have matching dimensions
+            if vocab_size != self.word_embeddings.shape[0]:
+                logger.warning(f"Vocabulary size mismatch: W has {vocab_size} terms, "
+                             f"embeddings have {self.word_embeddings.shape[0]} terms")
+                # Use the minimum size to avoid index errors
+                vocab_size = min(vocab_size, self.word_embeddings.shape[0])
+            
             for i in range(self.config['n_clusters']):
-                cluster_weights = self.cluster_discovery.W[:, i]  # Term weights for cluster i
-                # Weighted average of word embeddings
+                # Get cluster weights for the available vocabulary
+                cluster_weights = self.cluster_discovery.W[:vocab_size, i]
+                
+                # Normalize weights
+                weight_sum = np.sum(cluster_weights)
+                if weight_sum > 0:
+                    cluster_weights = cluster_weights / weight_sum
+                else:
+                    # If no weights, use uniform distribution
+                    cluster_weights = np.ones(vocab_size) / vocab_size
+                
+                # Weighted average of word embeddings (only for available vocab)
                 weighted_embedding = np.sum(
-                    self.word_embeddings * cluster_weights[:, np.newaxis], 
+                    self.word_embeddings[:vocab_size] * cluster_weights[:, np.newaxis], 
                     axis=0
-                ) / (np.sum(cluster_weights) + 1e-8)
+                )
                 cluster_embeddings.append(weighted_embedding)
             
             cluster_embeddings = np.vstack(cluster_embeddings)
@@ -320,6 +340,8 @@ class CLARETrainingManager:
                     ).to(self.device)
             
             logger.info(f"Initialized cluster embeddings from discovered clusters")
+        else:
+            logger.warning("No cluster discovery results found, using random initialization")
         
         # Initialize trainer
         self.trainer = CLARETrainer(self.model, self.device)
