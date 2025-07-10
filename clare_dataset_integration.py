@@ -740,28 +740,40 @@ class CLARETorchDataset(Dataset):
         )
         
         # Tokenize negative documents
-        neg_encodings = []
-        for neg_doc in sampled_negatives:
-            neg_encoding = self.tokenizer(
-                neg_doc['document'],
-                truncation=True,
-                padding='max_length',
-                max_length=self.config.max_doc_length,
-                return_tensors='pt'
-            )
-            neg_encodings.append(neg_encoding)
+        neg_input_ids_list = []
+        neg_attention_mask_list = []
+        
+        # Always return negative_sampling_ratio negatives (pad with zeros if needed)
+        for i in range(self.config.negative_sampling_ratio):
+            if i < len(sampled_negatives):
+                neg_encoding = self.tokenizer(
+                    sampled_negatives[i]['document'],
+                    truncation=True,
+                    padding='max_length',
+                    max_length=self.config.max_doc_length,
+                    return_tensors='pt'
+                )
+                neg_input_ids_list.append(neg_encoding['input_ids'].squeeze())
+                neg_attention_mask_list.append(neg_encoding['attention_mask'].squeeze())
+            else:
+                # Pad with zeros if we don't have enough negatives
+                neg_input_ids_list.append(torch.zeros(self.config.max_doc_length, dtype=torch.long))
+                neg_attention_mask_list.append(torch.zeros(self.config.max_doc_length, dtype=torch.long))
+        
+        # Stack negative encodings
+        neg_input_ids = torch.stack(neg_input_ids_list) if neg_input_ids_list else torch.zeros((self.config.negative_sampling_ratio, self.config.max_doc_length), dtype=torch.long)
+        neg_attention_mask = torch.stack(neg_attention_mask_list) if neg_attention_mask_list else torch.zeros((self.config.negative_sampling_ratio, self.config.max_doc_length), dtype=torch.long)
         
         return {
             'query_input_ids': query_encoding['input_ids'].squeeze(),
             'query_attention_mask': query_encoding['attention_mask'].squeeze(),
             'pos_doc_input_ids': pos_encoding['input_ids'].squeeze(),
             'pos_doc_attention_mask': pos_encoding['attention_mask'].squeeze(),
-            'neg_doc_input_ids': torch.stack([neg['input_ids'].squeeze() 
-                                             for neg in neg_encodings]) if neg_encodings else torch.tensor([]),
-            'neg_doc_attention_mask': torch.stack([neg['attention_mask'].squeeze() 
-                                                  for neg in neg_encodings]) if neg_encodings else torch.tensor([]),
+            'neg_doc_input_ids': neg_input_ids,
+            'neg_doc_attention_mask': neg_attention_mask,
             'query_id': query_id,
-            'dataset': positive_doc['dataset']
+            'dataset': positive_doc['dataset'],
+            'num_valid_negatives': min(len(sampled_negatives), self.config.negative_sampling_ratio)
         }
 
 class DatasetAnalyzer:
