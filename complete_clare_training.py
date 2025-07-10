@@ -66,11 +66,12 @@ class CLARETrainer:
         
         negative_scores = []
         for neg_doc_outputs in neg_doc_outputs_list:
-            neg_clusters = neg_doc_outputs['cluster_activations']  # [batch_size, n_clusters]
-            neg_score = torch.sum(query_clusters * neg_clusters, dim=1)  # [batch_size]
-            negative_scores.append(neg_score)
+            if neg_doc_outputs is not None:  # Check if we have valid negative outputs
+                neg_clusters = neg_doc_outputs['cluster_activations']  # [batch_size, n_clusters]
+                neg_score = torch.sum(query_clusters * neg_clusters, dim=1)  # [batch_size]
+                negative_scores.append(neg_score)
         
-        if negative_scores:
+        if len(negative_scores) > 0:
             negative_scores = torch.stack(negative_scores, dim=1)  # [batch_size, num_negatives]
             
             # Compute contrastive loss as in paper
@@ -81,7 +82,8 @@ class CLARETrainer:
             denominator = pos_exp + torch.sum(neg_exp, dim=1, keepdim=True)
             ranking_loss = -torch.log(pos_exp / denominator).mean()
         else:
-            ranking_loss = torch.tensor(0.0, device=self.device)
+            # If no negatives, use a simple margin loss
+            ranking_loss = torch.relu(1.0 - positive_scores).mean()
         
         # 2. Cluster Consistency Loss (KL Divergence)
         # L_cluster = KL(α_q || α_d+) as specified in paper
@@ -101,12 +103,13 @@ class CLARETrainer:
         
         # Compute accuracy for monitoring
         with torch.no_grad():
-            if negative_scores:
+            if len(negative_scores) > 0:
                 # Check if positive score is higher than all negatives
                 predictions = (positive_scores.unsqueeze(1) > negative_scores).all(dim=1)
                 accuracy = predictions.float().mean().item()
             else:
-                accuracy = 0.0
+                # If no negatives, check if positive score is high
+                accuracy = (positive_scores > 0.5).float().mean().item()
         
         return total_loss, {
             'ranking_loss': ranking_loss.item(),
@@ -449,15 +452,32 @@ class CLARETrainingManager:
             
             # Forward pass for negative documents
             neg_doc_outputs_list = []
-            if batch['neg_doc_input_ids'].dim() == 3:  # [batch_size, num_negatives, seq_len]
+            # Handle both 2D and 3D negative tensors
+            if batch['neg_doc_input_ids'].dim() == 2:
+                # Single negative per query
+                neg_outputs = self.model(
+                    input_ids=batch['neg_doc_input_ids'],
+                    attention_mask=batch['neg_doc_attention_mask']
+                )
+                neg_doc_outputs_list.append(neg_outputs)
+            elif batch['neg_doc_input_ids'].dim() == 3:
+                # Multiple negatives per query
                 batch_size, num_negatives, seq_len = batch['neg_doc_input_ids'].shape
                 
+                # Process each negative
                 for i in range(num_negatives):
-                    neg_outputs = self.model(
-                        input_ids=batch['neg_doc_input_ids'][:, i, :],
-                        attention_mask=batch['neg_doc_attention_mask'][:, i, :]
-                    )
-                    neg_doc_outputs_list.append(neg_outputs)
+                    # Check if this negative is valid (not all zeros)
+                    neg_mask = batch['neg_doc_attention_mask'][:, i, :]
+                    if neg_mask.sum() > 0:  # Has actual content
+                        neg_outputs = self.model(
+                            input_ids=batch['neg_doc_input_ids'][:, i, :],
+                            attention_mask=batch['neg_doc_attention_mask'][:, i, :]
+                        )
+                        neg_doc_outputs_list.append(neg_outputs)
+            
+            # Skip batch if no valid negatives
+            if len(neg_doc_outputs_list) == 0:
+                continue
             
             # Compute loss
             loss, loss_components = self.trainer.compute_loss(
@@ -543,15 +563,30 @@ class CLARETrainingManager:
                 )
                 
                 neg_doc_outputs_list = []
-                if batch['neg_doc_input_ids'].dim() == 3:
+                # Handle both 2D and 3D negative tensors
+                if batch['neg_doc_input_ids'].dim() == 2:
+                    # Single negative per query
+                    neg_outputs = self.model(
+                        input_ids=batch['neg_doc_input_ids'],
+                        attention_mask=batch['neg_doc_attention_mask']
+                    )
+                    neg_doc_outputs_list.append(neg_outputs)
+                elif batch['neg_doc_input_ids'].dim() == 3:
                     batch_size, num_negatives, seq_len = batch['neg_doc_input_ids'].shape
                     
                     for i in range(num_negatives):
-                        neg_outputs = self.model(
-                            input_ids=batch['neg_doc_input_ids'][:, i, :],
-                            attention_mask=batch['neg_doc_attention_mask'][:, i, :]
-                        )
-                        neg_doc_outputs_list.append(neg_outputs)
+                        # Check if this negative is valid
+                        neg_mask = batch['neg_doc_attention_mask'][:, i, :]
+                        if neg_mask.sum() > 0:
+                            neg_outputs = self.model(
+                                input_ids=batch['neg_doc_input_ids'][:, i, :],
+                                attention_mask=batch['neg_doc_attention_mask'][:, i, :]
+                            )
+                            neg_doc_outputs_list.append(neg_outputs)
+                
+                # Skip if no valid negatives
+                if len(neg_doc_outputs_list) == 0:
+                    continue
                 
                 # Compute loss
                 loss, loss_components = self.trainer.compute_loss(
@@ -887,17 +922,27 @@ class CLARETrainingManager:
                 
                 # Process negatives
                 neg_scores_list = []
-                if batch['neg_doc_input_ids'].dim() == 3:
+                if batch['neg_doc_input_ids'].dim() == 2:
+                    neg_outputs = self.model(
+                        input_ids=batch['neg_doc_input_ids'],
+                        attention_mask=batch['neg_doc_attention_mask']
+                    )
+                    neg_clusters = neg_outputs['cluster_activations']
+                    neg_score = torch.sum(query_clusters * neg_clusters, dim=1)
+                    neg_scores_list.append(neg_score)
+                elif batch['neg_doc_input_ids'].dim() == 3:
                     batch_size, num_negatives, seq_len = batch['neg_doc_input_ids'].shape
                     
                     for i in range(num_negatives):
-                        neg_outputs = self.model(
-                            input_ids=batch['neg_doc_input_ids'][:, i, :],
-                            attention_mask=batch['neg_doc_attention_mask'][:, i, :]
-                        )
-                        neg_clusters = neg_outputs['cluster_activations']
-                        neg_score = torch.sum(query_clusters * neg_clusters, dim=1)
-                        neg_scores_list.append(neg_score)
+                        neg_mask = batch['neg_doc_attention_mask'][:, i, :]
+                        if neg_mask.sum() > 0:
+                            neg_outputs = self.model(
+                                input_ids=batch['neg_doc_input_ids'][:, i, :],
+                                attention_mask=batch['neg_doc_attention_mask'][:, i, :]
+                            )
+                            neg_clusters = neg_outputs['cluster_activations']
+                            neg_score = torch.sum(query_clusters * neg_clusters, dim=1)
+                            neg_scores_list.append(neg_score)
                 
                 # Collect scores
                 batch_size = pos_scores.size(0)
