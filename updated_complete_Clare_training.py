@@ -40,6 +40,23 @@ from clare_dataset_integration import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+def convert_to_serializable(obj):
+    """Convert numpy types to Python native types for JSON serialization"""
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {key: convert_to_serializable(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_to_serializable(item) for item in obj]
+    else:
+        return obj
+
+
 class CLARETrainer:
     """Trainer for CLARE model following paper's training procedure"""
 
@@ -118,6 +135,7 @@ class CLARETrainer:
             'total_loss': total_loss.item(),
             'accuracy': accuracy
         }
+
 
 class CLARETrainingManager:
     """Manager for CLARE training process - Paper Aligned"""
@@ -1215,16 +1233,16 @@ class CLARETrainingManager:
         # Plot training history
         self.plot_training_history()
 
-        # Save final results
+        # Save final results with conversion to serializable types
         results_path = os.path.join(
             self.config.get('checkpoint_dir', 'checkpoints'),
             'final_results.json'
         )
 
         final_results = {
-            'test_results': test_results,
-            'best_val_ndcg': self.best_val_ndcg,
-            'training_history': self.training_history,
+            'test_results': convert_to_serializable(test_results),
+            'best_val_ndcg': float(self.best_val_ndcg),
+            'training_history': convert_to_serializable(self.training_history),
             'config': self.config,
             'num_clusters': self.config['n_clusters'],
             'interpretability_examples': interpretability_examples[:10]
